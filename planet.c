@@ -2,7 +2,7 @@
 /* planet generating program */
 /* Copyright 1988--present Torben AE. Mogensen */
 
-/* version of June 2021 */
+char version[] = "August 14 2024";
 
 /* The program generates planet maps based on recursive spatial subdivision */
 /* of a tetrahedron containing the globe. The output is a colour BMP bitmap. */
@@ -29,6 +29,13 @@
 
 /* The primitive user interface is primarily a result of portability concerns */
 
+
+#include <stdio.h>
+#include <errno.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
 #ifdef THINK_C
 #define macintosh 1
 #endif
@@ -38,14 +45,17 @@
 #include <unix.h>
 #endif
 
+#ifdef WIN32
+#include <io.h>
+#undef min
+#undef max
 #define O_BINARY 0x8000
-
-#include <stdio.h>
-#include <errno.h>
-#include <math.h>
-#include <string.h>
-#include <stdlib.h>
-#include <string.h>
+#elif _WIN32
+#include <io.h>
+#undef min
+#undef max
+#define O_BINARY 0x8000
+#endif
 
 int BLACK = 0;
 int WHITE = 1;
@@ -57,8 +67,6 @@ int LOWEST = 6;
 int SEA = 7;
 int LAND = 8;
 int HIGHEST = 9;
-
-int debug = 0;
 
 int nonLinear = 0;
 
@@ -73,6 +81,10 @@ int rtable[65536], gtable[65536], btable[65536];
     PPM - Portable Pix Maps
     XPM - X-windows Pix Maps
  */
+
+double log_2(x)
+double x;
+{ return(log(x)/log(2.0)); }
 
 typedef enum ftype
     {
@@ -189,7 +201,8 @@ int Width = 800, Height = 600; /* default map size */
 unsigned short **col;  /* colour array */
 int **heights;         /* heightfield array */
 double **xxx, **yyy, **zzz; /* x,y,z arrays  (used for gridlines */
-int cl0[60][30]; /* search map */
+int cl0[1000][1000]; /* match map */
+int MatchWidth = 48, MatchHeight = 24;
 
 int do_outline = 0;  /* if 1, draw coastal outline */
 int do_bw = 0;       /* if 1, reduce map to black outline on white */
@@ -266,16 +279,17 @@ int ac;
 char **av;
 {
   void printppm(), printppmBW(), printbmp(), printbmpBW(),
-       printxpm(), printxpmBW(), printheights(), print_error();
+    printxpm(), printxpmBW(), printheights(), print_error(), reportError(char c);
   void mercator(), peter(), squarep(), mollweide(), sinusoid(), stereo(),
     orthographic(), gnomonic(), icosahedral(), azimuth(), conical();
   int i;
-  double rand2(), log_2(), planet1();
+  double rand2(),  planet1();
   void readcolors();
   void readmap(), makeoutline(), smoothshades();
   FILE *outfile, *colfile = NULL;
   char filename[256] = "planet-map";
   char colorsname[256] = "Olsson.col";
+  char biocolorsname[256] = "default.bio";
   int do_file = 0, tmp = 0;
   double tx, ty, tz;
 
@@ -302,7 +316,6 @@ char **av;
   _fcreator ='ttxt';
 
   ac = ccommand (&av);
-  debug = 1;
   do_file = 1;
 #endif
 
@@ -315,9 +328,9 @@ char **av;
   outfile = stdout;
 
 #ifdef WIN32
-  setmode(fileno(outfile), O_BINARY);
+  _setmode(fileno(outfile), O_BINARY);
 #elif _WIN32
-  setmode(fileno(outfile), O_BINARY);
+  _setmode(fileno(outfile), O_BINARY);
 #endif
 
   strcpy(cmdLine,"");
@@ -328,40 +341,50 @@ char **av;
   for (i = 1; i<ac; i++) {
     if (av[i][0] == '-') {
       switch (av[i][1]) {
-        case 'X' : debug = 1;
-                   break;
-        case 'V' : sscanf(av[++i],"%lf",&dd2);
-                   break;
-        case 'v' : sscanf(av[++i],"%lf",&dd1);
-                   break;
-        case 's' : sscanf(av[++i],"%lf",&rseed);
-                   break;
-        case 'w' : sscanf(av[++i],"%d",&Width);
-                   break;
-        case 'h' : sscanf(av[++i],"%d",&Height);
-                   break;
-        case 'm' : sscanf(av[++i],"%lf",&scale);
-                   break;
-        case 'o' : sscanf(av[++i],"%s",filename);
-                   do_file = 1;
-                   break;
+        case 'V' : if (++i < ac &&  sscanf(av[i],"%lf",&dd2)) break;
+	           reportError('V');
+        case 'v' : if (++i < ac &&  sscanf(av[i],"%lf",&dd1)) break;
+	           reportError('v');
+        case 's' : if (++i < ac &&  sscanf(av[i],"%lf",&rseed)) break;
+		   reportError('s');
+        case 'w' : if (++i < ac &&  sscanf(av[i],"%d",&Width)) break;
+		   reportError('w');
+        case 'h' : if (++i < ac && sscanf(av[i],"%d",&Height)) break;
+		   reportError('h');
+        case 'm' : if (++i < ac && sscanf(av[i],"%lf",&scale)) {
+	             if (scale < 0.1) scale = 0.1;
+                     break;
+		   }
+		   reportError('m');
+        case 'o' : if (++i < ac && sscanf(av[i],"%255[^\n]",filename)) {
+                     do_file = 1;
+                     break;
+		   }
+		   reportError('o');
         case 'x' : file_type =xpm;
                    break;
-        case 'C' : sscanf(av[++i],"%s",colorsname);
+        case 'R' : fprintf(stderr, "Version: %s\n", version);
                    break;
-        case 'l' : sscanf(av[++i],"%lf",&longi);
-                   while (longi<-180) longi += 360;
-                   while (longi>180) longi -= 360;
-                   break;
-                   break;
-        case 'L' : sscanf(av[++i],"%lf",&lat);
-                   if (lat<-90) lat = -90;
-                   if (lat>90) lat = 90;
-                   break;
-        case 'g' : sscanf(av[++i],"%lf",&vgrid);
-                   break;
-        case 'G' : sscanf(av[++i],"%lf",&hgrid);
-                   break;
+        case 'C' : if (++i < ac && sscanf(av[i],"%255[^\n]",colorsname)) break;
+		   reportError('C');
+        case 'Z' : if (++i < ac && sscanf(av[i],"%255[^\n]",biocolorsname)) break;
+		   reportError('Z');
+        case 'l' : if (++i < ac && sscanf(av[i],"%lf",&longi)) {
+                     while (longi<-180) longi += 360;
+                     while (longi>180) longi -= 360;
+                     break;
+	           }
+		   reportError('l');
+	case 'L' : if (++i < ac && sscanf(av[i],"%lf",&lat)) {
+                     if (lat<-90) lat = -90;
+                     if (lat>90) lat = 90;
+                     break;
+		   }
+		   reportError('L');
+        case 'g' : if (++i < ac && sscanf(av[i],"%lf",&vgrid)) break;
+		   reportError('g');
+        case 'G' : if (++i < ac && sscanf(av[i],"%lf",&hgrid)) break;
+		   reportError('G');
         case 'c' : latic += 1;
                    break;
         case 'S' : dd1 /= 2.0; POWA = 0.75;
@@ -393,27 +416,30 @@ char **av;
                    break;
         case 'H' : file_type = heightfield;
                    break;
-        case 'M' : matchMap = 1;
-                   sscanf(av[++i],"%lf",&matchSize);
-                   break;
-        case 'a' : sscanf(av[++i],"%lf",&shade_angle);
-                   break;
-        case 'A' : sscanf(av[++i],"%lf",&shade_angle2);
-                   break;
-        case 'i' : sscanf(av[++i],"%lf",&M);
-                   break;
-        case 'T' : sscanf(av[++i]," %lf",&rotate2);
-                   sscanf(av[++i]," %lf",&rotate1);
-                   while (rotate1<-180) rotate1 += 360;
-                   while (rotate1>180) rotate1 -= 360;
-                   while (rotate2<-180) rotate2 += 360;
-                   while (rotate2>180) rotate2 += 360;
-                   break;
+        case 'M' : if (i+1 < ac && sscanf(av[i+1],"%lf",&matchSize)) i++;
+	           else matchSize = 0.1;
+                   matchMap = 1;
+    	           break;
+        case 'a' : if (++i < ac && sscanf(av[i],"%lf",&shade_angle)) break;
+		   reportError('a');
+        case 'A' : if (++i < ac && sscanf(av[i],"%lf",&shade_angle2)) break;
+		   reportError('A');
+        case 'i' : if (++i < ac && sscanf(av[i],"%lf",&M)) break;
+		   reportError('i');
+        case 'T' : if (++i < ac && sscanf(av[i]," %lf",&rotate2))
+		     if (++i < ac && sscanf(av[i]," %lf",&rotate1)) {
+                       while (rotate1<-180) rotate1 += 360;
+                       while (rotate1>180) rotate1 -= 360;
+                       while (rotate2<-180) rotate2 += 360;
+                       while (rotate2>180) rotate2 += 360;
+                       break;
+		     }
+		   reportError('T');
         case 't' : temperature = 1; break;
         case 'r' : rainfall = 1; break;
         case 'z' : makeBiomes = 1; break;
         case 'p' : if (strlen(av[i])>2) view = av[i][2];
-                   else view = av[++i][0];
+                   else if (++i < ac) view = av[i][0]; else view = ' ';
                    switch (view) {
                      case 'm' :
                      case 'p' :
@@ -425,31 +451,23 @@ char **av;
                      case 'c' :
                      case 'M' :
                      case 'S' :
-                     case 'i' :
-                     case 'f' : break;
-             case 'h' : file_type = heightfield; break;
+                     case 'i' : break;
+                     case 'h' : file_type = heightfield; break;
                      default: fprintf(stderr,"Unknown projection: %s\n",av[i]);
-                              print_error(do_file ? filename : "standard output",
-                                         !do_file ? "" : file_ext(file_type));
+                              print_error();
                    }
                    break;
         default: fprintf(stderr,"Unknown option: %s\n",av[i]);
-                 print_error(do_file ? filename : "standard output",
-                            !do_file ? "" : file_ext(file_type));
+                 print_error();
       }
     }
     else {
       fprintf(stderr,"Unknown option: %s\n\n",av[i]);
-      print_error(do_file ? filename : "standard output",
-                 !do_file ? "" : file_ext(file_type));
+      print_error();
     }
   }
 
-  readcolors(colfile, colorsname);
-
-  if (do_file &&'\0' != filename[0]) {
-    if (strchr (filename, '.') == 0)
-      strcpy(&(filename[strlen(filename)]), file_ext(file_type));
+  readcolors(colfile, colorsname, biocolorsname);
 
 #ifdef macintosh
     switch (file_type)
@@ -467,6 +485,10 @@ char **av;
 
     _fcreator ='GKON';
 #endif
+
+  if (do_file &&'\0' != filename[0]) {
+    if (strchr (filename, '.') == 0)
+      strcpy(&(filename[strlen(filename)]), file_ext(file_type));
 
     outfile = fopen(filename,"wb");
 
@@ -621,11 +643,12 @@ char **av;
     }
   }
 
-  if (view == 'c') {
+  if (view == 'c' || view == 'm') {
     if (lat == 0) view = 'm';
         /* Conical approaches mercator when lat -> 0 */
-    if (abs(lat) >= PI - 0.000001) view = 's';
+    if (fabs(lat) >= PI - 0.000001) view = 's';
         /* Conical approaches stereo when lat -> +/- 90 */
+        /* Also to avoid division by 0 for Mercator when lat -> +/- 90 */
   }
 
   Depth = 3*((int)(log_2(scale*Height)))+6;
@@ -651,9 +674,6 @@ char **av;
   tetra[1].shadow = 0.0;
   tetra[2].shadow = 0.0;
   tetra[3].shadow = 0.0;
-
-  if (debug && (view != 'f'))
-    fprintf(stderr, "+----+----+----+----+----+\n");
 
   switch (view) {
 
@@ -749,9 +769,6 @@ char **av;
 
   if (doshade>0) smoothshades();
 
-  if (debug)
-    fprintf(stderr, "\n");
-
   /* plot picture */
   switch (file_type)
   {
@@ -775,7 +792,7 @@ char **av;
   return(0);
 }
 
-void readcolors(FILE *colfile, char* colorsname)
+void readcolors(FILE *colfile, char* colorsname, char* biocolorsname)
 {
   int crow, cNum = 0, oldcNum, i;
 
@@ -827,11 +844,11 @@ void readcolors(FILE *colfile, char* colorsname)
           /* interpolate colours between oldcNum and cNum */
           for (i = oldcNum+1; i<cNum; i++) {
             rtable[i] = (rtable[oldcNum]*(cNum-i)+rtable[cNum]*(i-oldcNum))
-                        / (cNum-oldcNum+1);
+                        / (cNum-oldcNum);
             gtable[i] = (gtable[oldcNum]*(cNum-i)+gtable[cNum]*(i-oldcNum))
-                        / (cNum-oldcNum+1);
+                        / (cNum-oldcNum);
             btable[i] = (btable[oldcNum]*(cNum-i)+btable[cNum]*(i-oldcNum))
-                        / (cNum-oldcNum+1);
+                        / (cNum-oldcNum);
           }
         }
     }
@@ -853,7 +870,10 @@ void readcolors(FILE *colfile, char* colorsname)
   }
 
   if (makeBiomes) {
-  /* make biome colours */
+  /* set default biome colours */
+  rtable['I'-64+LAND] = 255;
+  gtable['I'-64+LAND] = 255;
+  btable['I'-64+LAND] = 255;
   rtable['T'-64+LAND] = 210;
   gtable['T'-64+LAND] = 210;
   btable['T'-64+LAND] = 210;
@@ -884,9 +904,21 @@ void readcolors(FILE *colfile, char* colorsname)
   rtable['O'-64+LAND] = 110;
   gtable['O'-64+LAND] = 160;
   btable['O'-64+LAND] = 170;
-  rtable['I'-64+LAND] = 255;
-  gtable['I'-64+LAND] = 255;
-  btable['I'-64+LAND] = 255;
+
+    if (NULL != (colfile = fopen(biocolorsname, "r")))
+      for (crow = 0; !feof(colfile); crow++)
+	{
+	  char letter;
+	  int rValue,  gValue,  bValue, result = 0;
+	  result = fscanf(colfile, " %c %d %d %d",
+			  &letter, &rValue, &gValue, &bValue);
+	  
+	  if (result > 0 && strchr("ITGBDSFRWEO",letter)>0) {
+	    rtable[letter-64+LAND] = rValue;
+	    gtable[letter-64+LAND] = gValue;
+	    btable[letter-64+LAND] = bValue;
+	  }
+	}
   }
 }
 
@@ -968,15 +1000,24 @@ void makeoutline(int do_bw)
 
 void readmap()  /* reads in a map for matching */
 {
-  int i,j;
+  int i,j = 0, step = 1;
   double y;
-  char c;
-  int Width, Height;
+  char c, cs[1000];
+  int Width, Height = 0;
 
-  Width = 48; Height = 24;
-  for (j = 0; j < Height; j+=2) {
-    for(i = 0; i < Width ; i+=2) {
-      c = getchar();
+  do {
+    scanf("%255[^\n]\n",cs); /* read line */
+    /* fprintf(stderr,"%s\n",cs); */
+  
+    Width = strlen(cs);
+    if (Width<48) {
+      MatchWidth = 2*Width;
+      step = 2;
+    }
+    else MatchWidth = Width;
+
+    for(i = 0; i < MatchWidth ; i+=step) {
+      c = cs[i/step];
       switch (c) {
       case '.': cl0[i][j] = -8;
                 break;
@@ -996,18 +1037,27 @@ void readmap()  /* reads in a map for matching */
                 break;
       case '@': cl0[i][j] = 8;
                 break;
-      default: printf("Wrong map symbol: %c\n",c);
+      default: fprintf(stderr,"Wrong map symbol: %c\n",c);
       }
     }
-    c = getchar(); if (c!='\n') printf("Wrong map format: %c\n",c);
+    Height++;
+    j += step;
   }
-  /* interpolate */
-  for (j = 1; j < Height; j+=2)
-    for(i = 0; i < Width ; i+=2)
-      cl0[i][j] = (cl0[i][j-1] + cl0[i][(j+1)])/2;
-  for (j = 0; j < Height; j++)
-    for(i = 1; i < Width ; i+=2)
-      cl0[i][j] = (cl0[i-1][j] + cl0[(i+1)%Width][j])/2;
+  while (!feof(stdin));
+  
+  MatchHeight = step*Height;
+
+  /* fprintf(stderr,"%d %d\n",MatchWidth,MatchHeight); */
+
+  if (step==2) {
+    /* interpolate */
+    for (j = 1; j < MatchHeight; j+=2)
+      for(i = 0; i < MatchWidth ; i+=2)
+	cl0[i][j] = (cl0[i][j-1] + cl0[i][(j+1)])/2;
+    for (j = 0; j < MatchHeight; j++)
+      for(i = 1; i < MatchWidth ; i+=2)
+	cl0[i][j] = (cl0[i-1][j] + cl0[(i+1)%MatchWidth][j])/2;
+  }
 }
 
 
@@ -1023,7 +1073,7 @@ void smoothshades()
 
 void mercator()
 {
-  double y,scale1,cos2,theta1, log_2();
+  double y,scale1,cos2,theta1;
   int i,j,k;
   void planet0();
 
@@ -1032,8 +1082,6 @@ void mercator()
   y = 0.5*log(y);
   k = (int)(0.5*y*Width*scale/PI+0.5);
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     y = PI*(2.0*(j-k)-Height)/Width/scale;
     y = exp(2.*y);
     y = (y-1.)/(y+1.);
@@ -1049,7 +1097,7 @@ void mercator()
 
 void peter()
 {
-  double y,cos2,theta1,scale1, log_2();
+  double y,cos2,theta1,scale1;
   int k,i,j,water,land;
   void planet0();
 
@@ -1057,8 +1105,6 @@ void peter()
   k = (int)(0.5*y*Width*scale/PI+0.5);
   water = land = 0;
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     y = 0.5*PI*(2.0*(j-k)-Height)/Width/scale;
     if (fabs(y)>1.0)
       for (i = 0; i < Width ; i++) {
@@ -1078,21 +1124,17 @@ void peter()
       }
     }
   }
-  if (debug)
-    fprintf(stderr,"\n");
   fprintf(stderr,"water percentage: %d\n",100*water/(water+land));
 }
 
 void squarep()
 {
-  double y,scale1,theta1,cos2, log_2();
+  double y,scale1,theta1,cos2;
   int k,i,j;
   void planet0();
 
   k = (int)(0.5*lat*Width*scale/PI+0.5);
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     y = (2.0*(j-k)-Height)/Width/scale*PI;
     if (fabs(y+y)>PI)
       for (i = 0; i < Width ; i++) {
@@ -1114,13 +1156,11 @@ void squarep()
 
 void mollweide()
 {
-  double y,y1,zz,scale1,cos2,theta1,theta2, log_2();
+  double y,y1,zz,scale1,cos2,theta1,theta2;
   int i,j,i1=1,k;
   void planet0();
 
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     y1 = 2*(2.0*j-Height)/Width/scale;
     if (fabs(y1)>=1.0) for (i = 0; i < Width ; i++) {
       col[i][j] = BACK;
@@ -1157,14 +1197,12 @@ void mollweide()
 
 void sinusoid()
 {
-  double y,theta1,theta2,cos2,l1,i1,scale1, log_2();
+  double y,theta1,theta2,cos2,l1,i1,scale1;
   int k,i,j,l,c;
   void planet0();
 
   k = (int)(lat*Width*scale/PI+0.5);
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     y = (2.0*(j-k)-Height)/Width/scale*PI;
     if (fabs(y+y)>PI) for (i = 0; i < Width ; i++) {
       col[i][j] = BACK;
@@ -1195,15 +1233,12 @@ void sinusoid()
 
 void stereo()
 {
-  double x,y,ymin,ymax,z,zz,x1,y1,z1,theta1,theta2;
+  double x,y,z,zz,x1,y1,z1,theta1,theta2;
   int i,j;
+  double scale1;
   void planet0();
 
-  ymin = 2.0;
-  ymax = -2.0;
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     for (i = 0; i < Width ; i++) {
       x = (2.0*i-Width)/Height/scale;
       y = (2.0*j-Height)/Height/scale;
@@ -1215,11 +1250,7 @@ void stereo()
       x1 = clo*x+slo*sla*y+slo*cla*z;
       y1 = cla*y-sla*z;
       z1 = -slo*x+clo*sla*y+clo*cla*z;
-      if (y1 < ymin) ymin = y1;
-      if (y1 > ymax) ymax = y1;
-
-      /* for level-of-detail effect:
-         Depth = 3*((int)(log_2(scale*Height)/(1.0+x1*x1+y1*y1)))+6; */
+      if (scale<1.0) Depth = 3*((int)(log_2(scale*Height)))+6+1.5/scale;
 
       planet0(x1,y1,z1, i,j);
     }
@@ -1228,15 +1259,11 @@ void stereo()
 
 void orthographic()
 {
-  double x,y,z,x1,y1,z1,ymin,ymax,theta1,theta2,zz;
+  double x,y,z,x1,y1,z1,theta1,theta2,zz;
   int i,j;
   void planet0();
 
-  ymin = 2.0;
-  ymax = -2.0;
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     for (i = 0; i < Width ; i++) {
       x = (2.0*i-Width)/Height/scale;
       y = (2.0*j-Height)/Height/scale;
@@ -1248,8 +1275,6 @@ void orthographic()
         x1 = clo*x+slo*sla*y+slo*cla*z;
         y1 = cla*y-sla*z;
         z1 = -slo*x+clo*sla*y+clo*cla*z;
-        if (y1 < ymin) ymin = y1;
-        if (y1 > ymax) ymax = y1;
         planet0(x1,y1,z1, i,j);
       }
     }
@@ -1258,21 +1283,17 @@ void orthographic()
 
 void icosahedral() /* modified version of gnomonic */
 {
-  double x,y,z,x1,y1,z1,zz,theta1,theta2,ymin,ymax;
+  double x,y,z,x1,y1,z1,zz,theta1,theta2;
   int i,j;
   void planet0();
   double lat1, longi1, sla, cla, slo, clo, x0, y0, sq3_4, sq3;
   double L1, L2, S;
 
-  ymin = 2.0;
-  ymax = -2.0;
   sq3 = sqrt(3.0);
   L1 =  10.812317; /* theoretically 10.9715145571469; */
   L2 = -52.622632; /* theoretically -48.3100310579607; */
   S = 55.6; /* found by experimentation */
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     for (i = 0; i < Width ; i++) {
 
       x0 = 198.0*(2.0*i-Width)/Width/scale-36;
@@ -1392,8 +1413,6 @@ void icosahedral() /* modified version of gnomonic */
         y1 = cla*y-sla*z;
         z1 = -slo*x+clo*sla*y+clo*cla*z;
 
-        if (y1 < ymin) ymin = y1;
-        if (y1 > ymax) ymax = y1;
         planet0(x1,y1,z1, i,j);
       }
     }
@@ -1402,15 +1421,12 @@ void icosahedral() /* modified version of gnomonic */
 
 void gnomonic()
 {
-  double x,y,z,x1,y1,z1,zz,theta1,theta2,ymin,ymax;
+  double x,y,z,x1,y1,z1,zz,theta1,theta2;
   int i,j;
   void planet0();
 
-  ymin = 2.0;
-  ymax = -2.0;
+  if (scale<1.0) Depth = 3*((int)(log_2(scale*Height)))+6+1.5/scale;
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     for (i = 0; i < Width ; i++) {
       x = (2.0*i-Width)/Height/scale;
       y = (2.0*j-Height)/Height/scale;
@@ -1421,8 +1437,6 @@ void gnomonic()
       x1 = clo*x+slo*sla*y+slo*cla*z;
       y1 = cla*y-sla*z;
       z1 = -slo*x+clo*sla*y+clo*cla*z;
-      if (y1 < ymin) ymin = y1;
-      if (y1 > ymax) ymax = y1;
       planet0(x1,y1,z1, i,j);
     }
   }
@@ -1430,15 +1444,11 @@ void gnomonic()
 
 void azimuth()
 {
-  double x,y,z,x1,y1,z1,zz,theta1,theta2,ymin,ymax;
+  double x,y,z,x1,y1,z1,zz,theta1,theta2;
   int i,j;
   void planet0();
 
-  ymin = 2.0;
-  ymax = -2.0;
   for (j = 0; j < Height; j++) {
-    if (debug && ((j % (Height/25)) == 0))
-      {fprintf (stderr, "%c", view); fflush(stderr);}
     for (i = 0; i < Width ; i++) {
       x = (2.0*i-Width)/Height/scale;
       y = (2.0*j-Height)/Height/scale;
@@ -1454,8 +1464,6 @@ void azimuth()
         x1 = clo*x+slo*sla*y+slo*cla*z;
         y1 = cla*y-sla*z;
         z1 = -slo*x+clo*sla*y+clo*cla*z;
-        if (y1 < ymin) ymin = y1;
-        if (y1 > ymax) ymax = y1;
         planet0(x1,y1,z1, i,j);
       }
     }
@@ -1464,19 +1472,17 @@ void azimuth()
 
 void conical()
 {
-  double k1,c,y2,x,y,zz,x1,y1,z1,theta1,theta2,ymin,ymax,cos2;
+  double k1,c,y2,x,y,zz,x1,y1,z1,theta1,theta2,cos2;
   int i,j;
   void planet0();
 
-  ymin = 2.0;
-  ymax = -2.0;
+  if (scale<1.0) Depth = 3*((int)(log_2(scale*Height)))+6+1.5/scale;
+
   if (lat>0) {
     k1 = 1.0/sin(lat);
     c = k1*k1;
     y2 = sqrt(c*(1.0-sin(lat/k1))/(1.0+sin(lat/k1)));
     for (j = 0; j < Height; j++) {
-      if (debug && ((j % (Height/25)) == 0))
-        {fprintf (stderr, "%c", view); fflush(stderr);}
       for (i = 0; i < Width ; i++) {
         x = (2.0*i-Width)/Height/scale;
         y = (2.0*j-Height)/Height/scale+y2;
@@ -1487,16 +1493,13 @@ void conical()
           if (doshade>0) shades[i][j] = 255;
         } else {
           theta1 += longi-0.5*PI; /* theta1 is longitude */
-          theta2 = k1*asin((zz-c)/(zz+c));
-          /* theta2 is latitude */
+          theta2 = k1*asin((zz-c)/(zz+c)); /* theta2 is latitude */
           if (theta2 > 0.5*PI || theta2 < -0.5*PI) {
             col[i][j] = BACK;
             if (doshade>0) shades[i][j] = 255;
           } else {
             cos2 = cos(theta2);
             y = sin(theta2);
-            if (y < ymin) ymin = y;
-            if (y > ymax) ymax = y;
             planet0(cos(theta1)*cos2,y,-sin(theta1)*cos2, i, j);
           }
         }
@@ -1508,8 +1511,6 @@ void conical()
     c = k1*k1;
     y2 = sqrt(c*(1.0-sin(lat/k1))/(1.0+sin(lat/k1)));
     for (j = 0; j < Height; j++) {
-      if (debug && ((j % (Height/25)) == 0))
-        {fprintf (stderr, "%c", view); fflush(stderr);}
       for (i = 0; i < Width ; i++) {
         x = (2.0*i-Width)/Height/scale;
         y = (2.0*j-Height)/Height/scale-y2;
@@ -1520,16 +1521,13 @@ void conical()
           if (doshade>0) shades[i][j] = 255;
         } else {
           theta1 += longi-0.5*PI; /* theta1 is longitude */
-          theta2 = k1*asin((zz-c)/(zz+c));
-          /* theta2 is latitude */
+          theta2 = k1*asin((zz-c)/(zz+c)); /* theta2 is latitude */
           if (theta2 > 0.5*PI || theta2 < -0.5*PI) {
             col[i][j] = BACK;
             if (doshade>0) shades[i][j] = 255;
           } else {
             cos2 = cos(theta2);
             y = sin(theta2);
-            if (y < ymin) ymin = y;
-            if (y > ymax) ymax = y;
             planet0(cos(theta1)*cos2,y,-sin(theta1)*cos2, i, j);
           }
         }
@@ -1694,8 +1692,8 @@ int level;                  /* levels to go */
       if (matchMap && lab > matchSize) { /* use map height */
         double l, xx, yy;
         l = sqrt(e.x*e.x+e.y*e.y+e.z*e.z);
-        yy = asin(e.y/l)*23/PI+11.5;
-        xx = atan2(e.x,e.z)*23.5/PI+23.5;
+        yy = asin(e.y/l)*(MatchHeight-1)/PI+(MatchHeight-1)/2.0;
+	xx = atan2(e.x,e.z)*(MatchWidth-1)/2.0/PI+(MatchWidth-1)/2.0;
         e.h = cl0[(int)(xx+0.5)][(int)(yy+0.5)]*0.1/8.0;
       } else {
         if (lab>1.0) lab = pow(lab,0.5);
@@ -2226,13 +2224,14 @@ FILE *outfile;
   fclose(outfile);
 }
 
-double log_2(x)
-double x;
-{ return(log(x)/log(2.0)); }
-
-void print_error(char *filename, char *ext)
+void print_error()
 {
   fprintf(stderr,"Usage: planet [options]\n\n");
-  fprintf(stderr,"See Manual.txt for details\n\n");
+  fprintf(stderr,"See manual for details\n\n");
   exit(0);
+}
+
+void reportError(char c) {
+  fprintf(stderr,"Missing or bad argument to option -%c\n",c);
+  print_error();
 }
